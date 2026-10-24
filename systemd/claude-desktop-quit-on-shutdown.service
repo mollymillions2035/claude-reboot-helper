@@ -1,0 +1,13 @@
+[Unit]
+Description=Quit Claude Desktop cleanly before shutdown
+Documentation=file://%h/.local/bin/claude-desktop-quit-on-shutdown
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=/usr/bin/systemd-inhibit --what=shutdown --mode=delay --who="Claude Desktop" --why="Quitting Claude Desktop cleanly" %h/.local/bin/claude-desktop-quit-on-shutdown
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target

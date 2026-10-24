@@ -1,0 +1,68 @@
+#!/bin/bash
+# Quit Claude Desktop cleanly before reboot/shutdown.
+#
+# At shutdown systemd SIGTERMs every process in Claude's app scope at once, so
+# its GPU process dies before the main process knows it is quitting. Claude's
+# gpu-recovery counts those deaths as crashes and turns hardware acceleration
+# off. Run under a logind delay inhibitor (see the .service): on
+# PrepareForShutdown, SIGTERM only the main process, whose handler quits
+# without the confirm prompt, so later GPU deaths are ignored.
+#
+# Logout has the same problem (the GPU process dies with Hyprland), so
+# claude-desktop-quit-on-logout.service runs this with --now from ExecStop,
+# which systemd finishes before it stops Hyprland.
+
+set -u
+
+lock=${XDG_CONFIG_HOME:-$HOME/.config}/Claude/SingletonLock
+
+# Main process PID, from the SingletonLock symlink (<hostname>-<pid>)
+main_pid() {
+  local target pid
+  target=$(readlink "$lock" 2>/dev/null) || return 1
+  pid=${target##*-}
+  [[ $pid =~ ^[0-9]+$ ]] || return 1
+  [[ $(readlink "/proc/$pid/exe" 2>/dev/null) == */claude-desktop ]] || return 1
+  # Child processes carry --type= (in one rewritten argv string); the main
+  # process doesn't
+  tr '\0' ' ' <"/proc/$pid/cmdline" | grep -q -- '--type=' && return 1
+  echo "$pid"
+}
+
+quit_claude() {
+  local pid i
+  if ! pid=$(main_pid); then
+    echo "Claude Desktop not running"
+    return
+  fi
+  kill -TERM "$pid" 2>/dev/null || return
+  echo "Sent SIGTERM to Claude Desktop (PID $pid)"
+  # logind waits up to InhibitDelayMaxSec (15s here) for the lock
+  for i in {1..100}; do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      echo "Claude Desktop exited after $((i * 100))ms"
+      return
+    fi
+    sleep 0.1
+  done
+  echo "Claude Desktop still running after 10s; letting shutdown continue"
+}
+
+if [[ ${1:-} == --now ]]; then
+  quit_claude
+  exit 0
+fi
+
+exec {mon}< <(exec gdbus monitor --system --dest org.freedesktop.login1 --object-path /org/freedesktop/login1)
+mon_pid=$!
+
+while read -r line <&"$mon"; do
+  if [[ $line == *'.PrepareForShutdown (true,)'* ]]; then
+    quit_claude
+    kill "$mon_pid" 2>/dev/null
+    exit 0
+  fi
+done
+
+echo "login1 monitor ended unexpectedly" >&2
+exit 1
